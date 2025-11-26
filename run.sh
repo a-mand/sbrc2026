@@ -8,11 +8,11 @@ set -e # Exit immediately if any command fails
 
 # --- Client & Round Config ---
 # Define how many of each client type to create
-CLIENTS_HIGH_PERF=4  # Gets GPU + high CPU
-CLIENTS_LOW_PERF=0   # Gets NO GPU + limited CPU
+CLIENTS_HIGH_PERF=5  # Gets GPU + high CPU
+CLIENTS_LOW_PERF=5   # Gets NO GPU + limited CPU
 
-TOTAL_ROUNDS=5
-MIN_CLIENTS_FOR_AGGREGATION=4
+TOTAL_ROUNDS=10
+MIN_CLIENTS_FOR_AGGREGATION=10
 # ---------------------------------------------------------------
 # (Derived values - DO NOT EDIT)
 NUM_CLIENTS=$(($CLIENTS_HIGH_PERF + $CLIENTS_LOW_PERF))
@@ -104,18 +104,24 @@ echo "✅ docker-compose.yml generated."
 #################################################################
 
 echo "🧹 Cleaning up old containers..."
-docker-compose down
+# It is safer to remove orphans here during cleanup
+docker-compose down --remove-orphans
 
 # Create a unique log file name with a timestamp
 LOG_FILE="fl_logs/simulation_$(date +'%Y%m%d_%H%M%S').log"
 
-echo "🚀 Building and running simulation..."
+echo "🚀 Building images..."
+docker-compose build
+
+echo "📦 Preparing Data (Downloading & Partitioning)..."
+# CORRECTION: Removed '--remove-orphans' from this line
+docker-compose run --rm server python prepare_data.py
+
+echo "▶️ Starting Simulation..."
 echo "🪵 Log file will be saved to: $LOG_FILE"
 
-# Run the simulation
-# The '| tee' command shows logs in the terminal AND saves to a file.
-docker-compose up --build --exit-code-from server | tee $LOG_FILE
+# Keep '--remove-orphans' here
+docker-compose up --remove-orphans --exit-code-from server | tee $LOG_FILE
 
 echo "---"
 echo "✅ Simulation complete. Log saved to $LOG_FILE"
-echo "📦 Final model saved to fl_logs/$SAVED_MODEL_NAME"

@@ -1,52 +1,30 @@
 import torch
+import io
 import logging
-from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
-def get_model_state(model):
+def get_model_bytes(model):
     """
-    Gets the model's state_dict and converts tensors to lists
-    for JSON serialization.
+    Serializes the model state_dict to a binary BytesIO buffer.
     """
-    logger.debug("Serializing model state to JSON-safe format...")
-    state_dict = model.state_dict()
-    
-    # Move tensors to CPU and convert to lists
-    serializable_state = {
-        key: tensor.cpu().tolist() 
-        for key, tensor in state_dict.items()
-    }
-    return serializable_state
+    logger.debug("Serializing model to bytes...")
+    buffer = io.BytesIO()
+    # Save just the state_dict (weights), not the whole class
+    torch.save(model.state_dict(), buffer)
+    buffer.seek(0)
+    return buffer.read()
 
-def set_model_state(model, model_state):
+def set_model_from_bytes(model, model_bytes):
     """
-    Converts a JSON-safe model state (lists) back into a 
-    PyTorch state_dict (tensors) and loads it into the model.
+    Loads a binary stream of weights into the model.
     """
-    logger.debug("Deserializing model state from JSON...")
-    
-    # Get the model's current state to match dtypes and devices
-    current_state_dict = model.state_dict()
-    
-    # Create a new state_dict with the correct types
-    new_state_dict = OrderedDict()
-    for key, param_list in model_state.items():
-        if key not in current_state_dict:
-            logger.warning("Skipping key %s (not in model's state_dict)", key)
-            continue
-            
-        current_tensor = current_state_dict[key]
-        
-        # Create tensor from list, matching original's dtype and device
-        new_state_dict[key] = torch.tensor(param_list, 
-                                           dtype=current_tensor.dtype,
-                                           device=current_tensor.device)
-    
+    logger.debug("Deserializing model from bytes...")
+    buffer = io.BytesIO(model_bytes)
     try:
-        model.load_state_dict(new_state_dict)
+        state_dict = torch.load(buffer, map_location='cpu')
+        model.load_state_dict(state_dict)
         logger.debug("Successfully loaded new model state.")
     except Exception as e:
-        logger.error("Failed to load state_dict: %s", e)
-        # This can happen if model architectures don't match
+        logger.error(f"Failed to load state_dict from bytes: {e}")
         raise

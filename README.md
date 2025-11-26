@@ -107,6 +107,15 @@ This script will:
 
 ---
 
+### 5. Monitor Progress
+
+Once the containers start, access the dashboard:
+
+  * **TensorBoard:** [http://localhost:6006](https://www.google.com/search?q=http://localhost:6006)
+  * **Server Logs:** `tail -f fl_logs/simulation_*.log`
+
+-----
+
 ## 📂 Project Structure
 
 ```
@@ -154,6 +163,21 @@ This script will:
    fl_logs/simulation_<timestamp>.log
    ```
 10. The system shuts down gracefully, stopping all containers.
+
+---
+
+## 🛠️ Advanced Usage
+
+### Viewing Logs (Remote/SSH)
+
+If running on a remote server via SSH, forward port **6006** to your local machine to view TensorBoard.
+
+### Adding a New Model
+
+1.  Open `shared/models.py`.
+2.  Define your PyTorch class (e.g., `ResNet18`).
+3.  Add it to the `get_model()` factory function.
+4.  Update `MODEL_NAME` in `config.py`.
 
 ---
 
