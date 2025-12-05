@@ -78,9 +78,12 @@ def setup_initial_model():
     logger.info(f"Initial model for round 0 created and stored in memory.")
     logger.info(f"Strategy: {config.AGGREGATION_STRATEGY} initialized.")
 
-def state_dict_to_bytes(state_dict):
+def state_dict_to_bytes(data_payload):
+    """
+    Serializes a payload (Dict or OrderedDict) to bytes.
+    """
     buffer = io.BytesIO()
-    torch.save(state_dict, buffer)
+    torch.save(data_payload, buffer)
     buffer.seek(0)
     return buffer.read()
 
@@ -148,13 +151,6 @@ def evaluate_model(model_state_tensors, test_loader):
     return accuracy, avg_loss
 
 def check_and_aggregate(test_loader):
-    """
-    Aggregates client updates using the configured strategy.
-    This function is now called by EITHER the timer OR submit_update.
-    It must be called from WITHIN the aggregation_lock.
-    """
-    global fl_strategy
-    
     if fl_state["status"] == "AGGREGATING":
         return
         
@@ -170,51 +166,47 @@ def check_and_aggregate(test_loader):
     else:
         logger.info(f"--- Aggregating {len(fl_state['client_updates'])} updates for round {current_round} ---")
         
-        # --- ROBUSTNESS CHECK: Filter out corrupted updates ---
-        valid_updates = []
-        for update in fl_state["client_updates"]:
-            client_state_dict = update['model_update']
-            is_corrupted = False
-            
-            for key, tensor in client_state_dict.items():
-                if torch.isnan(tensor).any() or torch.isinf(tensor).any():
-                    is_corrupted = True
-                    break
-            
-            if is_corrupted:
-                logger.error(f"⚠️ Client {update['client_id']} sent corrupted weights (NaN/Inf). Dropping update.")
-            else:
-                valid_updates.append(update)
+        # 1. Aggregate
+        aggregation_result = fl_strategy.aggregate(fl_state["client_updates"])
         
-        if len(valid_updates) == 0:
-            logger.error("❌ All updates were corrupted or empty. Cannot aggregate.")
-            new_global_model_tensors = None
+        # 2. Unwrap Payload (Handle Scaffold vs Standard)
+        if isinstance(aggregation_result, dict) and "model_state" in aggregation_result:
+            # Complex Strategy (Scaffold)
+            new_global_model_tensors = aggregation_result["model_state"]
+            # We save the WHOLE result (including global_c) to send to clients
+            payload_to_save = aggregation_result 
         else:
-            # --- USE THE STRATEGY (NEW) ---
-            new_global_model_tensors = fl_strategy.aggregate(valid_updates)
-            logger.info(f"Aggregation complete. (Used {len(valid_updates)}/{len(fl_state['client_updates'])} updates)")
-        # ------------------------------
-        
+            # Simple Strategy (FedAvg)
+            new_global_model_tensors = aggregation_result
+            payload_to_save = aggregation_result
+
+        # 3. Evaluate (Use only the model weights)
         if new_global_model_tensors:
             accuracy, loss = evaluate_model(new_global_model_tensors, test_loader)
-            tb_writer.add_scalar("Global/Accuracy", accuracy, fl_state["current_round"])
-            tb_writer.add_scalar("Global/Loss", loss, fl_state["current_round"])
+            
+            # Log Metrics
+            tb_writer.add_scalar("Global/Accuracy", accuracy, current_round)
+            tb_writer.add_scalar("Global/Loss", loss, current_round)
             tb_writer.flush()
+            
             logger.info(f"--- Round {current_round} Complete. Accuracy: {accuracy:.2f}%, Loss: {loss:.4f} ---")
             
-            # Store result in memory
-            global_models_by_round[current_round + 1] = new_global_model_tensors
+            # 4. Save State for Next Round
+            # We save the wrapped payload so download_model() sends the right data
+            global_models_by_round[current_round + 1] = payload_to_save
             
             if current_round == config.TOTAL_ROUNDS - 1:
                 try:
                     save_path = os.path.join("fl_logs", config.SAVED_MODEL_NAME)
                     os.makedirs("fl_logs", exist_ok=True)
+                    # For the final file, usually just save the weights
                     torch.save(new_global_model_tensors, save_path)
                     logger.info(f"--- Final model saved to {save_path} ---")
                 except Exception as e:
                     logger.error(f"Failed to save final model: {e}", exc_info=True)
 
     fl_state["current_round"] += 1
+    fl_state["client_updates"] = [] # Clear updates for next round
     
     if fl_state["current_round"] >= config.TOTAL_ROUNDS:
         logger.info(f"--- All {config.TOTAL_ROUNDS} rounds complete. ---")
@@ -316,11 +308,11 @@ def submit_update():
     if fl_state["status"] != "WAITING":
         return jsonify({"error": "Server is not accepting updates right now."}), 400
     
-    # Parse Multipart
     if 'model' not in request.files or 'json' not in request.form:
         return jsonify({"error": "Missing model or metadata"}), 400
 
     try:
+        # 1. Parse JSON Metadata
         metadata = json.loads(request.form['json'])
         client_id = metadata.get('client_id')
         num_samples = metadata.get('num_samples')
@@ -334,14 +326,22 @@ def submit_update():
             logger.warning(f"SIMULATING DROPOUT: Ignoring update from {client_id}.")
             return jsonify({"status": "Update received"})
         
-        # Read bytes and deserialize immediately to tensors
+        # 2. Parse Binary Data (The Model + Tensors)
         file_bytes = request.files['model'].read()
-        client_state_dict = torch.load(io.BytesIO(file_bytes), map_location='cpu')
+        binary_data = torch.load(io.BytesIO(file_bytes), map_location='cpu')
         
-    except json.JSONDecodeError:
-        return jsonify({"error": "Invalid JSON metadata"}), 400
+        # Check if it is a Composite Payload (Model + Extra Tensors)
+        if isinstance(binary_data, dict) and "model_state" in binary_data:
+            client_state_dict = binary_data["model_state"]
+            # Extract the tensor metrics (e.g. scaffold_delta_c) and merge them back into metrics
+            if "tensor_metrics" in binary_data:
+                metrics.update(binary_data["tensor_metrics"])
+        else:
+            # It's just a standard model state_dict (Old Client / FedAvg)
+            client_state_dict = binary_data
+        
     except Exception as e:
-        logger.error(f"Error parsing client update: {e}")
+        logger.error(f"Error parsing client update: {e}", exc_info=True)
         return jsonify({"error": "Failed to parse update"}), 400
     
     with fl_state["aggregation_lock"]:
@@ -353,23 +353,17 @@ def submit_update():
                 logger.warning(f"Client {client_id} tried to submit a second update.")
                 return jsonify({"error": "Already received update for this round"}), 400
         
+        # Store everything
         fl_state["client_updates"].append({
             "client_id": client_id,
             "num_samples": num_samples,
             "model_update": client_state_dict,
-            "metrics": metrics
+            "metrics": metrics # Now contains both JSON info AND SCAFFOLD Tensors
         })
-
-        step = fl_state["current_round"]
-        
-        tb_writer.add_scalar(f"System/TrainingTime/{client_id}", metrics.get('training_time_sec', 0), step)
-        tb_writer.add_scalar(f"System/RAM/{client_id}", metrics.get('peak_ram_mb', 0), step)
-        tb_writer.add_scalar(f"System/GPU/{client_id}", metrics.get('peak_gpu_mb', 0), step)
-        tb_writer.add_scalar(f"System/UploadSize/{client_id}", metrics.get('payload_size_mb', 0), step)
         
         logger.info(
             f"Update from {client_id} (Round {fl_state['current_round']}): "
-            f"Upload: {metrics.get('payload_size_mb', '?'):.2f}MB "
+            f"Upload: {metrics.get('payload_size_mb', 0):.2f}MB "
             f"({len(fl_state['client_updates'])}/{config.MIN_CLIENTS_PER_ROUND})"
         )
         

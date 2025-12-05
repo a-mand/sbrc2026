@@ -4,27 +4,33 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def get_model_bytes(model):
+def get_model_bytes(payload):
     """
-    Serializes the model state_dict to a binary BytesIO buffer.
+    Serializes a payload (model dict or composite dict) to bytes.
     """
-    logger.debug("Serializing model to bytes...")
     buffer = io.BytesIO()
-    # Save just the state_dict (weights), not the whole class
-    torch.save(model.state_dict(), buffer)
+    torch.save(payload, buffer)
     buffer.seek(0)
     return buffer.read()
 
 def set_model_from_bytes(model, model_bytes):
     """
-    Loads a binary stream of weights into the model.
+    Loads bytes. If it's a SCAFFOLD payload, extracts the model first.
+    Returns the 'extra_data' (e.g., global_c) if present.
     """
-    logger.debug("Deserializing model from bytes...")
     buffer = io.BytesIO(model_bytes)
     try:
-        state_dict = torch.load(buffer, map_location='cpu')
-        model.load_state_dict(state_dict)
-        logger.debug("Successfully loaded new model state.")
+        data = torch.load(buffer, map_location='cpu')
+        
+        # Check if this is a composite payload (SCAFFOLD style)
+        if isinstance(data, dict) and "model_state" in data:
+            model.load_state_dict(data["model_state"])
+            return data.get("extra_payload") # Return the Control Variate
+        else:
+            # It's just a standard model state_dict
+            model.load_state_dict(data)
+            return None
+            
     except Exception as e:
         logger.error(f"Failed to load state_dict from bytes: {e}")
         raise

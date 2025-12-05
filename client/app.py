@@ -16,13 +16,13 @@ from torch.utils.data import DataLoader, Subset
 # Make sure these paths are correct for your structure
 from client.trainer import train_model 
 from client.model_utils import get_model_bytes, set_model_from_bytes
+from client.algorithms import get_client_algorithm
 from shared.models import get_model
 import config
 
 # --- Configuration ---
 SERVER_URL = os.getenv("SERVER_URL", "http://127.0.0.1:5000")
 CLIENT_ID = os.getenv("CLIENT_ID", "default_client")
-#POLL_INTERVAL = 10 # Seconds to wait between status checks
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='INFO:%(name)s:%(message)s')
@@ -41,7 +41,6 @@ def register_client():
         elif response.status_code == 400: # Already registered
              logger.info("Client already registered. Proceeding.")
              return True
-        # --- CHANGE THIS LINE ---
         logger.error("Failed to register. Status: %s, Body: %s", response.status_code, response.text)
         return False
     except requests.exceptions.ConnectionError:
@@ -67,43 +66,60 @@ def download_global_model(round_number):
         return None
 
 def submit_model_update(model, num_samples, metrics):
-    """Submits the locally trained model update to the server (Binary Protocol)."""
+    """Submits the locally trained model update to the server."""
     url = f"{SERVER_URL}/submit_update"
     
     try:
-        # 1. Serialize model to bytes (Binary)
-        #    This replaces the 'get_model_state' call.
-        model_bytes = get_model_bytes(model)
+        # 1. Prepare Binary Data
+        # Start with standard model weights
+        binary_data = model.state_dict()
         
-        # 2. Calculate payload size 
-        #    (Much safer now: just the length of the byte buffer)
+        # Check if we have Tensor metrics (like SCAFFOLD's delta_c)
+        tensor_metrics = {}
+        keys_to_remove = []
+        
+        for key, value in metrics.items():
+            # Check if it's a Tensor or a dict of Tensors
+            if hasattr(value, 'cpu') or (isinstance(value, dict) and len(value) > 0 and hasattr(next(iter(value.values())), 'cpu')):
+                tensor_metrics[key] = value
+                keys_to_remove.append(key)
+        
+        # Remove Tensors from the JSON metrics dict to prevent serialization errors
+        for k in keys_to_remove:
+            del metrics[k]
+
+        # If we found tensors, create a Composite Payload
+        if tensor_metrics:
+            binary_data = {
+                "model_state": binary_data,
+                "tensor_metrics": tensor_metrics
+            }
+            
+        # Serialize the binary data
+        model_bytes = get_model_bytes(binary_data)
+        
+        # 2. Update Upload Size Metric
         metrics["payload_size_mb"] = len(model_bytes) / (1024 * 1024)
         
-        # 3. Prepare Metadata
-        #    We send the metadata (client_id, metrics) as a separate JSON field.
+        # 3. Prepare Metadata (Safe JSON)
         metadata = {
             "client_id": CLIENT_ID,
             "num_samples": num_samples,
-            "metrics": metrics
+            "metrics": metrics 
         }
         
-        # 4. Prepare Multipart Payload
-        #    'model': The binary file
-        #    'json': The metadata string
+        # 4. Send Multipart Request
         files = {
             'model': ('model.pth', model_bytes, 'application/octet-stream'),
             'json': (None, json.dumps(metadata), 'application/json'),
         }
 
-        # --- Simulation: Slow Sender ---
+        # Simulation: Slow Sender
         if config.SLOW_SENDER_RATE > 0 and random.random() < config.SLOW_SENDER_RATE:
             delay = config.SLOW_SENDER_DELAY_SEC
-            logger.warning(f"SIMULATING SLOW SENDER: Delaying update submission by {delay}s...")
+            logger.warning(f"SIMULATING SLOW SENDER: Delaying by {delay}s...")
             time.sleep(delay)
-        # -------------------------------
 
-        # 5. Send Request
-        #    requests.post automatically handles multipart headers when 'files' is passed
         response = requests.post(url, files=files)
         
         if response.status_code == 200:
@@ -113,11 +129,7 @@ def submit_model_update(model, num_samples, metrics):
         logger.error(f"Failed to submit update. Status: {response.status_code}, Body: {response.text}")
         return False
 
-    except requests.exceptions.ConnectionError:
-        logger.error(f"Failed to connect to server at {url}")
-        return False
     except Exception as e:
-        # This catches serialization errors or other unexpected crashes
         logger.error(f"Error during model submission: {e}", exc_info=True)
         return False
 
@@ -127,7 +139,7 @@ def check_server_status():
     try:
         response = requests.get(url)
         if response.status_code == 200:
-            return response.json() # Returns {"status": "...", "current_round": ...}
+            return response.json()
         logger.warning("Could not get server status: %s", response.status_code)
         return None
     except requests.exceptions.ConnectionError:
@@ -190,6 +202,10 @@ def main():
     global_model = get_model(config.MODEL_NAME)
     logger.info("Model %s instantiated.", global_model.__class__.__name__)
     
+    # --- Instantiate the Algorithm ONCE (Preserves State) ---
+    algorithm = get_client_algorithm(config.CLIENT_ALGO)
+    logger.info(f"Algorithm {config.CLIENT_ALGO} initialized.")
+    
     # --- Load this client's data partition ---
     try:
         # Get the number from the CLIENT_ID (e.g., "client_001" -> 1)
@@ -206,7 +222,7 @@ def main():
 
     # 2. Download initial model (Round 0)
     logger.info("Waiting for initial model (round 0)...")
-    model_bytes = None # Renamed variable for clarity
+    model_bytes = None
     while model_bytes is None:
         model_bytes = download_global_model(current_round)
         if model_bytes is None:
@@ -218,39 +234,43 @@ def main():
     while True:
         logger.info("--- Starting Round %d ---", current_round)
         
-        # 3. Load model state and train
+        # 3. Download and Extract
         try:
-            # <--- FIX 1: Use the new binary deserializer --->
-            set_model_from_bytes(global_model, model_bytes)
+            # set_model_from_bytes now returns the extra payload (e.g., Global C for Scaffold)
+            extra_payload = set_model_from_bytes(global_model, model_bytes)
             
-            # 2. Train the model using the real data
+            # 4. Train the model using the algorithm
             logger.info("Starting local training...")
             start_time = time.time()
-            num_samples, peak_gpu_mb, peak_ram_mb = train_model(global_model, client_dataloader)
+            
+            # Pass algorithm instance and extra payload to train_model
+            num_samples, peak_gpu_mb, peak_ram_mb, training_metrics = train_model(
+                global_model, 
+                client_dataloader, 
+                algorithm, 
+                extra_payload
+            )
+            
             end_time = time.time()
-
             training_time_sec = end_time - start_time
             logger.info(f"Local training complete in {training_time_sec:.2f}s.")
-            
-            # <--- FIX 2: REMOVED 'new_model_state = get_model_state(...)' --->
-            # We don't need it because submit_model_update now takes 'global_model' directly.
 
         except Exception as e:
             logger.error(f"Local training for round {current_round} failed: {e}", exc_info=True)
             time.sleep(15) 
             continue
         
-        
-        # 4. Submit model update
+        # 5. Submit model update
         logger.info("Submitting trained model update from %d samples...", num_samples)
         
+        # Combine all metrics
         client_metrics = {
-           "training_time_sec": training_time_sec,
+            "training_time_sec": training_time_sec,
             "peak_gpu_mb": peak_gpu_mb,
-            "peak_ram_mb": peak_ram_mb
+            "peak_ram_mb": peak_ram_mb,
+            **training_metrics  # Include any additional metrics from training
         }
         
-        # Note: We pass 'global_model' (the object), not a state dict
         if not submit_model_update(global_model, num_samples, client_metrics):
             logger.warning("Failed to submit update. Retrying in 10s.")
             time.sleep(10)
@@ -258,7 +278,7 @@ def main():
 
         logger.info("Update submitted. Waiting for next round...")
         
-        # 5. Wait for server to finish aggregation
+        # 6. Wait for server to finish aggregation
         while True:
             time.sleep(config.POLL_INTERVAL)
             status_data = check_server_status()
@@ -280,7 +300,7 @@ def main():
                 new_model_bytes_response = download_global_model(server_round)
                 
                 if new_model_bytes_response:
-                    model_bytes = new_model_bytes_response # Update the bytes
+                    model_bytes = new_model_bytes_response
                     current_round = server_round  
                     break 
                 else:

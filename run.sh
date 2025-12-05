@@ -7,44 +7,50 @@ set -e # Exit immediately if any command fails
 #################################################################
 
 # --- Client & Round Config ---
-# Define how many of each client type to create
-CLIENTS_HIGH_PERF=5  # Gets GPU + high CPU
-CLIENTS_LOW_PERF=5   # Gets NO GPU + limited CPU
+CLIENTS_HIGH_PERF=2  # GPU + Fast Network
+CLIENTS_LOW_PERF=3   # CPU + Slow Network (Stragglers)
 
 TOTAL_ROUNDS=10
-MIN_CLIENTS_FOR_AGGREGATION=10
-# ---------------------------------------------------------------
-# (Derived values - DO NOT EDIT)
-NUM_CLIENTS=$(($CLIENTS_HIGH_PERF + $CLIENTS_LOW_PERF))
-MIN_CLIENTS_PER_ROUND=$NUM_CLIENTS
+MIN_CLIENTS_FOR_AGGREGATION=5
 
 # --- Client Training Config ---
 LOCAL_EPOCHS=3
 BATCH_SIZE=32
 LEARNING_RATE=0.01
+MOMENTUM=0.9
+
+# --- NEW: Robustness & Strategy Config ---
+# Client Side Algorithm: "Standard", "FedProx", "Scaffold"
+CLIENT_ALGO="FedProx"
+FEDPROX_MU=0.01  # Penalty weight for FedProx (0.01 - 1.0)
+
+# Server Side Strategy: "FedAvg", "FedAvgM", "FedAdam", "Scaffold"
+AGGREGATION_STRATEGY="FedAvgM"
+SERVER_LEARNING_RATE=1.0  # How fast the global model updates (1.0 for FedAvg)
+SERVER_MOMENTUM=0.9       # Server-side momentum (0.0 to 0.9)
 
 # --- Data Config (Non-IID) ---
 DIRICHLET_ALPHA=0.5
 
 # --- FL Condition Simulation ---
-CLIENT_DROPOUT_RATE=0.0  # 0.0 = no dropout, 0.3 = 30% dropout
-ROUND_TIMEOUT_SEC=300     # Max time in seconds for a round
+CLIENT_DROPOUT_RATE=0.0
+ROUND_TIMEOUT_SEC=300
 
-# --- NEW: Slow Sender & Latency Config ---
+# --- Network Traffic Simulation (Docker-TC) ---
 SLOW_SENDER_RATE=0.0
 SLOW_SENDER_DELAY_SEC=30
 NETWORK_LATENCY_RATE=0.0
 NETWORK_LATENCY_DELAY_SEC=5
 
-# --- Other System Config ---
-DEVICE="auto" # Options: "auto", "cpu", "cuda"
-MOMENTUM=0.9
+# --- System ---
+DEVICE="auto"
 POLL_INTERVAL=10
 RANDOM_SEED=42
 SAVED_MODEL_NAME="final_global_model.pth"
 
 # ---------------------------------------------------------------
 # (Derived values - DO NOT EDIT)
+NUM_CLIENTS=$(($CLIENTS_HIGH_PERF + $CLIENTS_LOW_PERF))
 MIN_CLIENTS_PER_ROUND=$NUM_CLIENTS
 TOTAL_CLIENTS=$NUM_CLIENTS
 CONFIG_FILE="config.py"
@@ -58,22 +64,34 @@ CONFIG_FILE="config.py"
 
 echo "▶️ Starting simulation with $NUM_CLIENTS clients for $TOTAL_ROUNDS rounds..."
 
-# Check if config.py exists
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "❌ Error: $CONFIG_FILE not found. Cannot configure run."
     exit 1
 fi
 
-# Use 'sed' to find and replace values in config.py
-# This command finds the line starting with "VAR_NAME =" and replaces it.
 echo "🔄 Updating $CONFIG_FILE with new parameters..."
+
+# Basic FL Config
 sed -i "s/^TOTAL_ROUNDS = .*/TOTAL_ROUNDS = $TOTAL_ROUNDS/" $CONFIG_FILE
 sed -i "s/^MIN_CLIENTS_PER_ROUND = .*/MIN_CLIENTS_PER_ROUND = $MIN_CLIENTS_PER_ROUND/" $CONFIG_FILE
 sed -i "s/^TOTAL_CLIENTS = .*/TOTAL_CLIENTS = $TOTAL_CLIENTS/" $CONFIG_FILE
+sed -i "s/^MIN_CLIENTS_FOR_AGGREGATION = .*/MIN_CLIENTS_FOR_AGGREGATION = $MIN_CLIENTS_FOR_AGGREGATION/" $CONFIG_FILE
+
+# Training Hyperparameters
 sed -i "s/^LOCAL_EPOCHS = .*/LOCAL_EPOCHS = $LOCAL_EPOCHS/" $CONFIG_FILE
 sed -i "s/^BATCH_SIZE = .*/BATCH_SIZE = $BATCH_SIZE/" $CONFIG_FILE
 sed -i "s/^LEARNING_RATE = .*/LEARNING_RATE = $LEARNING_RATE/" $CONFIG_FILE
 sed -i "s/^MOMENTUM = .*/MOMENTUM = $MOMENTUM/" $CONFIG_FILE
+
+# --- NEW: Strategy & Algorithm Injection ---
+sed -i "s/^CLIENT_ALGO = .*/CLIENT_ALGO = \"$CLIENT_ALGO\"/" $CONFIG_FILE
+sed -i "s/^FEDPROX_MU = .*/FEDPROX_MU = $FEDPROX_MU/" $CONFIG_FILE
+sed -i "s/^AGGREGATION_STRATEGY = .*/AGGREGATION_STRATEGY = \"$AGGREGATION_STRATEGY\"/" $CONFIG_FILE
+sed -i "s/^SERVER_LEARNING_RATE = .*/SERVER_LEARNING_RATE = $SERVER_LEARNING_RATE/" $CONFIG_FILE
+sed -i "s/^SERVER_MOMENTUM = .*/SERVER_MOMENTUM = $SERVER_MOMENTUM/" $CONFIG_FILE
+# -------------------------------------------
+
+# System & Simulation
 sed -i "s/^POLL_INTERVAL = .*/POLL_INTERVAL = $POLL_INTERVAL/" $CONFIG_FILE
 sed -i "s/^DIRICHLET_ALPHA = .*/DIRICHLET_ALPHA = $DIRICHLET_ALPHA/" $CONFIG_FILE
 sed -i "s/^RANDOM_SEED = .*/RANDOM_SEED = $RANDOM_SEED/" $CONFIG_FILE
@@ -81,7 +99,6 @@ sed -i "s/^SAVED_MODEL_NAME = .*/SAVED_MODEL_NAME = \"$SAVED_MODEL_NAME\"/" $CON
 sed -i "s/^DEVICE = .*/DEVICE = \"$DEVICE\"/" $CONFIG_FILE
 sed -i "s/^CLIENT_DROPOUT_RATE = .*/CLIENT_DROPOUT_RATE = $CLIENT_DROPOUT_RATE/" $CONFIG_FILE
 sed -i "s/^ROUND_TIMEOUT_SEC = .*/ROUND_TIMEOUT_SEC = $ROUND_TIMEOUT_SEC/" $CONFIG_FILE
-sed -i "s/^MIN_CLIENTS_FOR_AGGREGATION = .*/MIN_CLIENTS_FOR_AGGREGATION = $MIN_CLIENTS_FOR_AGGREGATION/" $CONFIG_FILE
 sed -i "s/^SLOW_SENDER_RATE = .*/SLOW_SENDER_RATE = $SLOW_SENDER_RATE/" $CONFIG_FILE
 sed -i "s/^SLOW_SENDER_DELAY_SEC = .*/SLOW_SENDER_DELAY_SEC = $SLOW_SENDER_DELAY_SEC/" $CONFIG_FILE
 sed -i "s/^NETWORK_LATENCY_RATE = .*/NETWORK_LATENCY_RATE = $NETWORK_LATENCY_RATE/" $CONFIG_FILE
@@ -104,24 +121,21 @@ echo "✅ docker-compose.yml generated."
 #################################################################
 
 echo "🧹 Cleaning up old containers..."
-# It is safer to remove orphans here during cleanup
 docker-compose down --remove-orphans
 
-# Create a unique log file name with a timestamp
 LOG_FILE="fl_logs/simulation_$(date +'%Y%m%d_%H%M%S').log"
 
 echo "🚀 Building images..."
 docker-compose build
 
 echo "📦 Preparing Data (Downloading & Partitioning)..."
-# CORRECTION: Removed '--remove-orphans' from this line
 docker-compose run --rm server python prepare_data.py
 
 echo "▶️ Starting Simulation..."
 echo "🪵 Log file will be saved to: $LOG_FILE"
 
-# Keep '--remove-orphans' here
 docker-compose up --remove-orphans --exit-code-from server | tee $LOG_FILE
 
 echo "---"
 echo "✅ Simulation complete. Log saved to $LOG_FILE"
+echo "📦 Final model saved to fl_logs/$SAVED_MODEL_NAME"

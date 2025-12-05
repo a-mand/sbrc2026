@@ -1,5 +1,6 @@
 from .fedavg import FedAvg
 from .fedopt import FedOpt
+from .scaffold import ScaffoldStrategy
 import torch.optim as optim
 
 def get_strategy(strategy_name, global_model=None, lr=1.0, momentum=0.0):
@@ -8,6 +9,11 @@ def get_strategy(strategy_name, global_model=None, lr=1.0, momentum=0.0):
     """
     if strategy_name == "FedAvg":
         return FedAvg()
+    
+    elif strategy_name == "Scaffold":   # <--- ADD THIS
+        if global_model is None:
+            raise ValueError("Scaffold requires global_model")
+        return ScaffoldStrategy(global_model)
     
     elif strategy_name == "FedAvgM":
         # FedAvgM is just FedOpt with SGD + Momentum

@@ -1,105 +1,81 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import logging
-import config
+import time
+import torch
 import torch.cuda
 import psutil
 import os
-import copy  # <--- ADDED for FedProx
+import config
 
-# Get a logger for this module
 logger = logging.getLogger(__name__)
 
-
-def train_model(model, client_data):
+def train_model(model, client_data, algorithm, extra_payload=None):
     """
-    Performs local training on the client's model with FedProx support.
+    Wrapper that executes the selected Client Algorithm.
+    
+    Args:
+        model: The neural network model to train
+        client_data: DataLoader containing client's training data
+        algorithm: The client algorithm instance (e.g., StandardSGD, FedProx, Scaffold)
+        extra_payload: Optional algorithm-specific data from server (e.g., global_c for Scaffold)
     
     Returns:
-        (int) num_samples: Number of samples trained on.
-        (float) peak_gpu_mb: Peak GPU memory used in megabytes.
-        (float) peak_ram_mb: Peak System RAM used in megabytes.
+        tuple: (num_samples, peak_gpu_mb, peak_ram_mb, metrics_dict)
     """
     
-    # --- Set device based on config ---
+    # 1. Setup Device
     forced_device = config.DEVICE.lower()
     if forced_device == "cpu":
         device = torch.device("cpu")
-    elif forced_device == "cuda":
-        if not torch.cuda.is_available():
-            logger.warning("CUDA requested but not available! Falling back to CPU.")
-            device = torch.device("cpu")
-        else:
-            device = torch.device("cuda")
-    else:  # "auto" or any other value
+    elif forced_device == "cuda" and torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+    logger.info(f"Training with algorithm: {config.CLIENT_ALGO} on {device}")
 
-    model.to(device)
-    logger.info(f"Training on device: {device}")
-    
-    # --- GPU Memory Stats ---
+    # 2. Track Resources - Start
     if device.type == 'cuda':
         torch.cuda.reset_peak_memory_stats(device)
-        
-    # --- System RAM Stats ---
     process = psutil.Process(os.getpid())
-    peak_ram_mb = 0.0
+    start_time = time.time()
 
-    data_loader = client_data 
-    num_samples = len(data_loader.dataset)
+    # 3. EXECUTE TRAINING
+    # Pass extra_payload (e.g., Global C for Scaffold) to the algorithm
+    # The algorithm's train() method should accept global_c as a kwarg
+    try:
+        metrics = algorithm.train(
+            model, 
+            client_data, 
+            device, 
+            config.LOCAL_EPOCHS, 
+            global_c=extra_payload
+        )
+    except TypeError as e:
+        # Fallback for algorithms that don't accept global_c parameter
+        logger.warning(f"Algorithm {config.CLIENT_ALGO} doesn't accept global_c parameter. "
+                      f"Calling without extra_payload.")
+        metrics = algorithm.train(model, client_data, device, config.LOCAL_EPOCHS)
     
-    # --- FEDPROX: Save initial global weights ---
-    # We need a frozen copy of the global model to compute the proximal term
-    if config.FEDPROX_MU > 0:
-        global_model_params = [p.clone().detach() for p in model.parameters()]
-        logger.info(f"FedProx enabled with mu={config.FEDPROX_MU}")
-    # ---------------------------------------------
+    # Ensure metrics is a dictionary
+    if metrics is None:
+        metrics = {}
+    elif not isinstance(metrics, dict):
+        logger.warning(f"Algorithm returned non-dict metrics: {type(metrics)}. Converting to empty dict.")
+        metrics = {}
+
+    # 4. Capture Metrics - End
+    end_time = time.time()
+    num_samples = len(client_data.dataset)
+    training_time_sec = end_time - start_time
     
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=config.LEARNING_RATE, momentum=config.MOMENTUM)
-
-    model.train() 
-
-    for epoch in range(config.LOCAL_EPOCHS):
-        running_loss = 0.0
-        
-        for data, labels in data_loader:
-            data, labels = data.to(device), labels.to(device)
-
-            optimizer.zero_grad()
-            outputs = model(data)
-            loss = criterion(outputs, labels)
-            
-            # --- FEDPROX: Add Proximal Term ---
-            # Loss += (mu / 2) * || w - w_global ||^2
-            if config.FEDPROX_MU > 0:
-                proximal_term = 0.0
-                for w, w_global in zip(model.parameters(), global_model_params):
-                    # Ensure w_global is on the same device as w
-                    w_global = w_global.to(device)
-                    proximal_term += (w - w_global).norm(2) ** 2
-                
-                loss += (config.FEDPROX_MU / 2) * proximal_term
-            # ----------------------------------
-
-            loss.backward()
-            optimizer.step()
-            
-            running_loss += loss.item()
-            
-            # --- Check RAM usage per batch ---
-            current_ram_bytes = process.memory_info().rss
-            peak_ram_mb = max(peak_ram_mb, current_ram_bytes / (1024 * 1024))
-        
-        epoch_loss = running_loss / len(data_loader)
-        logger.info(f"Epoch {epoch+1}/{config.LOCAL_EPOCHS} - Loss: {epoch_loss:.4f}")
-
-    logger.info("Local training complete.")
-    
-    # --- Get peak GPU memory usage ---
     peak_gpu_bytes = torch.cuda.max_memory_allocated(device) if device.type == 'cuda' else 0
     peak_gpu_mb = peak_gpu_bytes / (1024 * 1024)
+    peak_ram_mb = process.memory_info().rss / (1024 * 1024)
 
-    # Return all three metrics
-    return num_samples, peak_gpu_mb, peak_ram_mb
+    # Log training completion
+    logger.info(f"Training completed: {num_samples} samples in {training_time_sec:.2f}s")
+    logger.info(f"Resource usage - GPU: {peak_gpu_mb:.2f}MB, RAM: {peak_ram_mb:.2f}MB")
+
+    # 5. Return all metrics
+    # metrics dict may contain algorithm-specific data like 'delta_c' for Scaffold
+    return num_samples, peak_gpu_mb, peak_ram_mb, metrics
