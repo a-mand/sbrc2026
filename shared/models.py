@@ -24,6 +24,10 @@ class SimpleCNN(nn.Module):
         x = self.fc3(x)
         return x
 
+    def get_lightning_state_dict(self):
+        full_sd = self.state_dict()
+        return {k: v for k, v in full_sd.items() if 'fc' in k}
+
 class SimpleMLP(nn.Module):
     """
     A simple MLP for flattened inputs.

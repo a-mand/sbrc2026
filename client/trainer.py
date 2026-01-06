@@ -8,7 +8,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-def train_model(model, client_data, algorithm, extra_payload=None):
+def train_model(model, client_data, algorithm, extra_payload=None, extra_payload2=None, strategy="treino_normal"):
     """
     Wrapper that executes the selected Client Algorithm.
     
@@ -32,6 +32,23 @@ def train_model(model, client_data, algorithm, extra_payload=None):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     logger.info(f"Training with algorithm: {config.CLIENT_ALGO} on {device}")
+    all_labels = []
+    all_features = []
+    for inputs, labels in client_data:
+        all_labels.extend(labels.tolist())
+        all_features.append(inputs.view(inputs.size(0), -1).mean(dim=0).numpy())
+
+    # Qualidade de dados
+    counts = np.bincount(all_labels)
+    probs = counts / len(all_labels)
+    entropy = float(entropy(probs))
+
+    stats_summary = np.mean(all_features, axis=0).tolist()
+
+    local_epochs = config.LOCAL_EPOCHS
+    if strategy == "modelo_leve":
+        local_epochs = max(1, config.LOCAL_EPOCHS // 2)
+        logger.warning(f"Estratégia modelo_leve ativada. Local epochs reduzidos para {local_epochs}.")
 
     # 2. Track Resources - Start
     if device.type == 'cuda':
@@ -42,19 +59,20 @@ def train_model(model, client_data, algorithm, extra_payload=None):
     # 3. EXECUTE TRAINING
     # Pass extra_payload (e.g., Global C for Scaffold) to the algorithm
     # The algorithm's train() method should accept global_c as a kwarg
+    logger.info(f"Starting training for {local_epochs} epochs.")
     try:
         metrics = algorithm.train(
             model, 
             client_data, 
             device, 
-            config.LOCAL_EPOCHS, 
+            local_epochs,
             global_c=extra_payload
         )
     except TypeError as e:
         # Fallback for algorithms that don't accept global_c parameter
         logger.warning(f"Algorithm {config.CLIENT_ALGO} doesn't accept global_c parameter. "
                       f"Calling without extra_payload.")
-        metrics = algorithm.train(model, client_data, device, config.LOCAL_EPOCHS)
+        metrics = algorithm.train(model, client_data, device, local_epochs)
     
     # Ensure metrics is a dictionary
     if metrics is None:
@@ -72,8 +90,14 @@ def train_model(model, client_data, algorithm, extra_payload=None):
     peak_gpu_mb = peak_gpu_bytes / (1024 * 1024)
     peak_ram_mb = process.memory_info().rss / (1024 * 1024)
 
+    metrics.update({
+        "entropy": entropy,
+        "stats_summary": stats_summary,
+        "strategy_used": strategy,
+        "training_time_sec": training_time_sec,
+    })
     # Log training completion
-    logger.info(f"Training completed: {num_samples} samples in {training_time_sec:.2f}s")
+    logger.info(f"Training completed: {num_samples} samples in {training_time_sec:.2f}s, Entropy: {entropy:.4f}")
     logger.info(f"Resource usage - GPU: {peak_gpu_mb:.2f}MB, RAM: {peak_ram_mb:.2f}MB")
 
     # 5. Return all metrics

@@ -11,6 +11,7 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
+from scipy.stats import entropy as calculate_entropy
 
 # --- Assumed Imports (from your project) ---
 # Make sure these paths are correct for your structure
@@ -55,15 +56,20 @@ def download_global_model(round_number):
             delay = config.NETWORK_LATENCY_DELAY_SEC
             logger.warning(f"SIMULATING NETWORK LATENCY: Delaying download by {delay}s...")
             time.sleep(delay)
-        response = requests.get(url, params={"round": round_number})
+        response = requests.get(url, params={"round": round_number, "client_id": CLIENT_ID})
         if response.status_code == 200:
-            logger.info(f"Downloaded model for round {round_number} ({len(response.content)} bytes).")
-            return response.content
+            #logger.info(f"Downloaded model for round {round_number} ({len(response.content)} bytes).")
+            strategy = response.headers.get("X-Strategy", "treino_normal")
+            logger.info(f"Downloaded model. Strategy assigned: {strategy}.")
+            return response.content, strategy
         logger.error(f"Failed download. Status: {response.status_code}")
-        return None
-    except requests.exceptions.ConnectionError:
-        logger.error("Failed to connect to server at %s", url)
-        return None
+        return None, None
+    except Exception as e:
+        logger.error(f"Error during model download: {e}")
+        return None, None
+   # except requests.exceptions.ConnectionError:
+    #    logger.error("Failed to connect to server at %s", url)
+     #   return None
 
 def submit_model_update(model, num_samples, metrics):
     """Submits the locally trained model update to the server."""
@@ -218,13 +224,26 @@ def main():
         logger.error(f"Failed to load data: {e}. Exiting.")
         return
     
+    logger.info("Calculating local data metadata (Entropy)")
+    all_labels = []
+    for _, labels in client_dataloader:
+        all_labels.extend(labels.numpy().tolist())
+
+   # Entropia
+    counts = np.bincount(all_labels)
+    probabilities = counts / len(all_labels)
+    client_entropy = float(calculate_entropy(probabilities))
+
+   #stats_summary = np.mean(client_dataloader.dataset.dataset.data[client_dataloader.dataset.indices], axis=(0).tolist())
+    stats_summary = np.mean(client_dataloader.dataset.dataset.data[client_dataloader.dataset.indices], axis=0).tolist()
+    
     current_round = 0
 
     # 2. Download initial model (Round 0)
     logger.info("Waiting for initial model (round 0)...")
-    model_bytes = None
+    model_bytes, strategy = None, None
     while model_bytes is None:
-        model_bytes = download_global_model(current_round)
+        model_bytes, strategy = download_global_model(current_round)
         if model_bytes is None:
             time.sleep(5)
 
@@ -238,7 +257,8 @@ def main():
         try:
             # set_model_from_bytes now returns the extra payload (e.g., Global C for Scaffold)
             extra_payload = set_model_from_bytes(global_model, model_bytes)
-            
+
+
             # 4. Train the model using the algorithm
             logger.info("Starting local training...")
             start_time = time.time()
@@ -248,9 +268,13 @@ def main():
                 global_model, 
                 client_dataloader, 
                 algorithm, 
-                extra_payload
+                extra_payload,
+                strategy=strategy
             )
             
+            training_metrics["entropy"] = client_entropy
+            training_metrics["stats_summary"] = stats_summary
+            training_metrics["strategy_used"] = strategy
             end_time = time.time()
             training_time_sec = end_time - start_time
             logger.info(f"Local training complete in {training_time_sec:.2f}s.")

@@ -15,22 +15,37 @@ def get_model_bytes(payload):
 
 def set_model_from_bytes(model, model_bytes):
     """
-    Loads bytes. If it's a SCAFFOLD payload, extracts the model first.
-    Returns the 'extra_data' (e.g., global_c) if present.
+    Carrega os bytes. Se for um Modelo Leve ou SCAFFOLD, extrai as partes corretas.
+    Retorna o 'extra_payload' (como estratégia ou variates de controle).
     """
     buffer = io.BytesIO(model_bytes)
     try:
+        # Carrega os dados para a CPU primeiro por segurança
         data = torch.load(buffer, map_location='cpu')
         
-        # Check if this is a composite payload (SCAFFOLD style)
+        # 1. Caso seja um Payload Composto (Usado para SCAFFOLD ou Estratégias Proativas)
         if isinstance(data, dict) and "model_state" in data:
-            model.load_state_dict(data["model_state"])
-            return data.get("extra_payload") # Return the Control Variate
+            state_dict = data["model_state"]
+            
+            # Verificamos se é um update parcial (Modelo Leve)
+            # Se o state_dict tiver menos chaves que o modelo original, carregamos com strict=False
+            current_model_dict = model.state_dict()
+            is_partial = len(state_dict.keys()) < len(current_model_dict.keys())
+            
+            if is_partial:
+                logger.info("Modelo Leve detectado: Carregando apenas camadas parciais.")
+                current_model_dict.update(state_dict)
+                model.load_state_dict(current_model_dict)
+            else:
+                model.load_state_dict(state_dict)
+                
+            return data.get("extra_payload") 
+
+        # 2. Caso seja um state_dict padrão
         else:
-            # It's just a standard model state_dict
             model.load_state_dict(data)
             return None
             
     except Exception as e:
-        logger.error(f"Failed to load state_dict from bytes: {e}")
+        logger.error(f"Falha ao carregar o state_dict: {e}")
         raise
