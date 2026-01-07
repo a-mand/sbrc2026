@@ -7,14 +7,14 @@ set -e # Exit immediately if any command fails
 #################################################################
 
 # --- Client & Round Config ---
-CLIENTS_HIGH_PERF=5  # GPU + Fast Network
+CLIENTS_HIGH_PERF=20  # GPU + Fast Network
 CLIENTS_LOW_PERF=0   # CPU + Slow Network (Stragglers)
 
-TOTAL_ROUNDS=10
+TOTAL_ROUNDS=30
 MIN_CLIENTS_FOR_AGGREGATION=5
 
 # --- Client Training Config ---
-LOCAL_EPOCHS=3
+LOCAL_EPOCHS=5
 BATCH_SIZE=32
 LEARNING_RATE=0.01
 MOMENTUM=0.9

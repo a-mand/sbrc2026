@@ -4,9 +4,18 @@ import torch
 import torch.cuda
 import psutil
 import os
+import numpy as np
 import config
 
 logger = logging.getLogger(__name__)
+
+def calculate_entropy(probabilities):
+    """Calcula a entropia de Shannon usando NumPy para evitar dependência do SciPy."""
+    probs = np.array(probabilities)
+    probs = probs[probs > 0]  # Filtra zeros para evitar erro no log
+    if len(probs) == 0:
+        return 0.0
+    return -np.sum(probs * np.log(probs))
 
 def train_model(model, client_data, algorithm, extra_payload=None, extra_payload2=None, strategy="treino_normal"):
     """
@@ -41,7 +50,7 @@ def train_model(model, client_data, algorithm, extra_payload=None, extra_payload
     # Qualidade de dados
     counts = np.bincount(all_labels)
     probs = counts / len(all_labels)
-    entropy = float(entropy(probs))
+    entropy_val = float(calculate_entropy(probs))
 
     stats_summary = np.mean(all_features, axis=0).tolist()
 
@@ -60,14 +69,19 @@ def train_model(model, client_data, algorithm, extra_payload=None, extra_payload
     # Pass extra_payload (e.g., Global C for Scaffold) to the algorithm
     # The algorithm's train() method should accept global_c as a kwarg
     logger.info(f"Starting training for {local_epochs} epochs.")
+
+    train_kwargs = {
+        "model": model,
+        "dataloader": client_data,
+        "device": device,
+        "local_epochs": local_epochs
+    }
+
+    if config.CLIENT_ALGO.lower() == "scaffold" and extra_payload is not None:
+        train_kwargs["global_c"] = extra_payload
+
     try:
-        metrics = algorithm.train(
-            model, 
-            client_data, 
-            device, 
-            local_epochs,
-            global_c=extra_payload
-        )
+        metrics = algorithm.train(**train_kwargs)
     except TypeError as e:
         # Fallback for algorithms that don't accept global_c parameter
         logger.warning(f"Algorithm {config.CLIENT_ALGO} doesn't accept global_c parameter. "
@@ -91,13 +105,13 @@ def train_model(model, client_data, algorithm, extra_payload=None, extra_payload
     peak_ram_mb = process.memory_info().rss / (1024 * 1024)
 
     metrics.update({
-        "entropy": entropy,
+        "entropy": entropy_val,
         "stats_summary": stats_summary,
         "strategy_used": strategy,
         "training_time_sec": training_time_sec,
     })
     # Log training completion
-    logger.info(f"Training completed: {num_samples} samples in {training_time_sec:.2f}s, Entropy: {entropy:.4f}")
+    logger.info(f"Training completed: {num_samples} samples in {training_time_sec:.2f}s, Entropy: {entropy_val:.4f}")
     logger.info(f"Resource usage - GPU: {peak_gpu_mb:.2f}MB, RAM: {peak_ram_mb:.2f}MB")
 
     # 5. Return all metrics

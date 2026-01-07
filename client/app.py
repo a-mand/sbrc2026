@@ -11,7 +11,7 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, Subset
-from scipy.stats import entropy as calculate_entropy
+#from scipy.stats import entropy as calculate_entropy
 
 # --- Assumed Imports (from your project) ---
 # Make sure these paths are correct for your structure
@@ -139,6 +139,10 @@ def submit_model_update(model, num_samples, metrics):
         logger.error(f"Error during model submission: {e}", exc_info=True)
         return False
 
+def calculate_entropy(probabilities):
+	probs = probabilities[probabilities > 0]
+	return -np.sum(probs * np.log(probs))
+
 def check_server_status():
     """Polls the server for its current status and round."""
     url = f"{SERVER_URL}/status"
@@ -245,14 +249,28 @@ def main():
     while model_bytes is None:
         model_bytes, strategy = download_global_model(current_round)
         if model_bytes is None:
+            logger.error("Failed to download model. Retrying in 5s...")
             time.sleep(5)
+            continue
+
+        extra_payload = set_model_from_bytes(global_model, model_bytes)
 
     # ===================================================================
     # Main Training Loop
     # ===================================================================
     while True:
         logger.info("--- Starting Round %d ---", current_round)
-        
+
+
+        if current_round > 0:
+            logger.info(f"Downloading aggregated model for Round {current_round}...")
+            model_bytes, strategy = download_global_model(current_round)
+
+            if model_bytes is None:
+                logger.error("Failed to download model. Retrying in 10s...")
+                time.sleep(10)
+                continue
+ 
         # 3. Download and Extract
         try:
             # set_model_from_bytes now returns the extra payload (e.g., Global C for Scaffold)

@@ -10,6 +10,9 @@ import random
 import json
 
 # --- ML Imports ---
+import numpy as np
+#from shared.models import isinstance
+#from scipy.spatial.distance import directed_hausdorff, hausdorff_distance
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -362,25 +365,26 @@ def submit_update():
         
         if not all([client_id, num_samples is not None]):
             return jsonify({"error": "Missing required metadata"}), 400
-        
+
         if config.CLIENT_DROPOUT_RATE > 0 and random.random() < config.CLIENT_DROPOUT_RATE:
-            logger.warning(f"SIMULATING DROPOUT: Ignoring update from {client_id}.")
-            
-            if client_id in fl_state["markov_metrics"]:
-                fl_state["markov_metrics"][client_id][0][1] += 1
+            logger.warning(f"SIMULANDO 16% CLIENTE FALHANDO")
+        
+            if client_id not in fl_state["markov_metrics"]:
+                fl_state["markov_metrics"][client_id] = np.ones((4, 4))
+
+            fl_state["markov_metrics"][client_id][0][1] += 1
 
             return jsonify({"status": "Update received"})
         
         file_bytes = request.files['model'].read()
         binary_data = torch.load(io.BytesIO(file_bytes), map_location='cpu')
 
-        if insistance(binary_data, dict) and "model_state" in binary_data:
+        if isinstance(binary_data, dict) and "model_state" in binary_data:
             client_state_dict = binary_data["model_state"]
             if "tensor_metrics" in binary_data:
                 metrics.update(binary_data["tensor_metrics"])
         else:
             client_state_dict = binary_data
-
     except Exception as e:
         logger.error(f"Error parsing client update: {e}", exc_info=True)
         return jsonify({"error": "Failed to parse update"}), 400
@@ -389,9 +393,14 @@ def submit_update():
         if fl_state["status"] != "WAITING":
             return jsonify({"error": "Server is not accepting updates right now (locked)."}), 400
         
+
+
         if client_id not in fl_state["markov_metrics"]:
             import numpy as np
             fl_state["markov_metrics"][client_id] = np.ones((4,4))
+
+        if client_id not in fl_state["client_metrics"]:
+            fl_state["client_metrics"][client_id] = [[{}]] 
 
         fl_state["markov_metrics"][client_id][0][0] += 1
 
