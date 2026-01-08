@@ -9,7 +9,7 @@ class Scaffold(ClientAlgorithm):
     def __init__(self):
         self.local_c = None # Persistent local control variate
 
-    def train(self, model, dataloader, device, epochs, global_c=None):
+    def train(self, model, dataloader, device, local_epochs, global_c=None):
         model.to(device)
         model.train()
         
@@ -38,7 +38,7 @@ class Scaffold(ClientAlgorithm):
 
         # 2. Training Loop
         count = 0
-        for epoch in range(epochs):
+        for local_epoch in range(local_epochs):
             for data, labels in dataloader:
                 data, labels = data.to(device), labels.to(device)
                 

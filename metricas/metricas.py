@@ -3,7 +3,7 @@ import re
 import os
 
 # Caminho do arquivo fornecido
-log_path = "/home/amanda/Documentos/2025.4/lacis/VAR/FL-REST/fl_logs/simulation_20251217_150935.log"
+log_path = "/home/amanda/Documentos/2025.4/lacis/VAR/FL-REST/fl_logs/simulation_20260107_220235.log"
 
 def plot_federated_results(path):
     if not os.path.exists(path):

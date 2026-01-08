@@ -56,8 +56,12 @@ CLIENT_HIGH_PERF_TEMPLATE = """
     environment:
       - CLIENT_ID=client_{client_id_str}
       - SERVER_URL=http://server:5000
+      - CUDA_VISIBLE_DEVICES={gpu_id}
     deploy:
       resources:
+        limits: 
+          cpus: '0.5'
+          memory: '1G'
         reservations:
           devices:
             - driver: nvidia
@@ -81,9 +85,18 @@ def generate_compose_file(num_high, num_low):
     compose_content = YAML_HEADER
     client_counter = 1
 
-    for _ in range(num_high):
+    # Alterado de '_' para 'i' para podermos usar no cálculo da GPU
+    for i in range(num_high):
         client_id_str = f"{client_counter:03d}"
-        compose_content += CLIENT_HIGH_PERF_TEMPLATE.format(client_id_str=client_id_str)
+        
+        # Lógica de distribuição: IDs pares na GPU 0, ímpares na GPU 1
+        gpu_id = 0 if i % 2 == 0 else 1
+        
+        # Adicionado o gpu_id no .format()
+        compose_content += CLIENT_HIGH_PERF_TEMPLATE.format(
+            client_id_str=client_id_str,
+            gpu_id=gpu_id
+        )
         client_counter += 1
 
     for _ in range(num_low):
@@ -96,9 +109,10 @@ def generate_compose_file(num_high, num_low):
     try:
         with open('docker-compose.yml', 'w') as f:
             f.write(compose_content)
-        print(f"✅ Successfully generated 'docker-compose.yml' with {total_clients} clients (No Docker-TC).")
+        print(f"✅ Gerado 'docker-compose.yml' com {total_clients} clientes.")
+        print(f"🚀 Clientes High-Perf distribuídos entre GPU 0 e GPU 1.")
     except IOError as e:
-        print(f"❌ Error writing to file: {e}")
+        print(f"❌ Erro ao escrever arquivo: {e}")
         sys.exit(1)
 
 def main():

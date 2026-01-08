@@ -78,8 +78,16 @@ def setup_initial_model():
         momentum=config.SERVER_MOMENTUM
     )
     
-    # 3. Store the state_dict (tensors) directly
-    global_models_by_round[0] = initial_model.state_dict()
+    if config.AGGREGATION_STRATEGY.lower() == "scaffold":
+        # Cria um dicionário com pesos + controle global inicial (tudo zero)
+        global_c = {name: torch.zeros_like(param) for name, param in initial_model.named_parameters()}
+        global_models_by_round[0] = {
+            "model_state": initial_model.state_dict(),
+            "global_c": global_c
+        }
+    else:
+        # 3. Store the state_dict (tensors) directly
+        global_models_by_round[0] = initial_model.state_dict()
     
     logger.info(f"Initial model for round 0 created and stored in memory.")
     logger.info(f"Strategy: {config.AGGREGATION_STRATEGY} initialized.")
@@ -254,11 +262,19 @@ def trigger_aggregation(test_loader):
     """Callback function for the round timer."""
     with fl_state["aggregation_lock"]:
         if fl_state["status"] == "WAITING": 
-            logger.info(
-                f"--- ROUND {fl_state['current_round']} TIMEOUT ---"
-                f" Received {len(fl_state['client_updates'])} updates."
-            )
-            check_and_aggregate(test_loader) 
+            logger.info(f"--- ROUND {fl_state['current_round']} TIMEOUT ---")
+            
+            # --- ADICIONE ESTA LÓGICA DE REPARO AQUI ---
+            received_ids = [u["client_id"] for u in fl_state["client_updates"]]
+            for cid in list(fl_state["registered_clients"]):
+                if cid not in received_ids:
+                    # Tenta promover um reserva parecido via Hausdorff
+                    reserva = apply_hausdorff_repair(cid)
+                    if reserva:
+                        logger.info(f"Sucesso: Reserva {reserva['id']} pronto para substituir {cid}")
+            # -------------------------------------------
+            
+            check_and_aggregate(test_loader)
 
 def start_next_round_timer(test_loader): 
     """Starts the timer for the current round."""
@@ -332,9 +348,10 @@ def download_model():
         total_eventos = np.sum(row_sucesso)
 
         risk = (matrix[0][1] + 2*matrix[0][2] + 3*matrix[0][3]) / np.sum(matrix[0])
-        strategy = "modelo_leve" if risk < 0.6 else "treino_normal"
+        strategy = "modelo_leve" if risk > 0.6 else "treino_normal"
         logger.info(f"Serving round {requested_round} to {cid} with strategy {strategy} (risk: {risk:.4f})")
 
+     #  model_bytes = state_dict_to_bytes(state_dict)
         model_bytes = state_dict_to_bytes(state_dict)
         response = send_file(io.BytesIO(model_bytes),
                          mimetype='application/octet-stream',
@@ -396,7 +413,6 @@ def submit_update():
 
 
         if client_id not in fl_state["markov_metrics"]:
-            import numpy as np
             fl_state["markov_metrics"][client_id] = np.ones((4,4))
 
         if client_id not in fl_state["client_metrics"]:
